@@ -47,6 +47,22 @@ export function demoState(today) {
   add(d(10), 'Pay credit card', 'c-ccp', 'Transfer', 'a-card', 'IDR', 1500000, { link: 'dl2' });
   add(d(11), 'Birthday gift', 'c-gift', 'Expense', 'a-main', 'EUR', -35);
   add(d(12), 'Supermarket', 'c-food', 'Expense', 'a-main', 'EUR', -51.2);
+  // Four earlier months, so the Insights charts have a history to show.
+  const t0 = new Date(today + 'T00:00:00Z');
+  for (let back = 1; back <= 4; back++) {
+    const d0 = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth() - back, 1));
+    const pm = d0.toISOString().slice(0, 8);
+    const k = [1.08, 0.92, 1.15, 0.97][back - 1];
+    add(pm + '01', 'Monthly salary', 'c-salary', 'Income', 'a-main', 'EUR', 2400);
+    add(pm + '06', 'Weekend shifts', 'c-side', 'Income', 'a-main', 'EUR', 320);
+    add(pm + '01', 'Rent', 'c-rent', 'Expense', 'a-main', 'EUR', -900);
+    for (const day of ['03', '10', '17', '24']) add(pm + day, 'Supermarket', 'c-food', 'Expense', 'a-main', 'EUR', -Math.round(52 * k * 100) / 100);
+    add(pm + '04', 'Bus pass', 'c-transport', 'Expense', 'a-main', 'EUR', -32);
+    add(pm + '12', 'Dinner out', 'c-out', 'Expense', 'a-main', 'EUR', -Math.round(48 * k * 100) / 100);
+    add(pm + '20', 'Lunch out', 'c-out', 'Expense', 'a-cash', 'EUR', -Math.round(22 * k * 100) / 100);
+    add(pm + '05', 'Music subscription', 'c-subs', 'Expense', 'a-main', 'EUR', -11.99);
+    add(pm + '07', 'Index fund', 'c-invest', 'Expense', 'a-main', 'EUR', -300);
+  }
   s.plans = [{ id: 'dp1', item: 'Sample laptop', card: 'a-card', date: ym.slice(0, 7) + '-01', total: 12000000, tenor: 12, monthly: null }];
   return s;
 }

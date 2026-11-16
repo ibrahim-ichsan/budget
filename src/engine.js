@@ -259,3 +259,173 @@ export function buildTransfer(state, f, newId) {
   }
   return legs;
 }
+
+// ---- Insights (BG-10) -------------------------------------------------------
+// "Spending" here means Expense categories in the chosen tiers. Savings is left out by default,
+// because money moved into investments is not money spent. All figures are in the base currency.
+export const SPEND_TIERS = ['Needs', 'Wants', 'Giving'];
+export const mondayOf = (s) => addDays(s, -((new Date(s + 'T00:00:00Z').getUTCDay() + 6) % 7));
+const prevCycle = (state, cy) => (cy.m === 1 ? cycle(state, cy.y - 1, 12) : cycle(state, cy.y, cy.m - 1));
+const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);
+
+function spendCats(state, f = {}) {
+  const tiers = f.tiers || SPEND_TIERS;
+  return state.categories.filter((k) => k.type === 'Expense' && tiers.includes(k.tier) && (!f.cat || k.id === f.cat));
+}
+// Spending per category between two dates (inclusive). Refunds booked as a positive Expense net off.
+export function spendByCategory(state, from, to, f = {}) {
+  const cats = spendCats(state, f);
+  const ids = new Set(cats.map((k) => k.id));
+  const sum = {};
+  for (const tx of state.tx) {
+    if (tx.type !== 'Expense' || tx.date < from || tx.date > to || !ids.has(tx.cat)) continue;
+    if (f.acct && tx.acct !== f.acct) continue;
+    sum[tx.cat] = (sum[tx.cat] || 0) - idrCents(state, tx);
+  }
+  return cats.map((k) => ({ id: k.id, name: k.name, tier: k.tier, spent: toBase(state, u(sum[k.id] || 0)) }))
+    .filter((r) => Math.abs(r.spent) > 0.004).sort((a, b) => b.spent - a.spent);
+}
+export const spendBetween = (state, from, to, f = {}) => spendByCategory(state, from, to, f).reduce((s, r) => s + r.spent, 0);
+
+// Budget for the filtered categories in one cycle. A budget is set per category, not per account,
+// so an account filter has no budget to compare with.
+export function spendBudget(state, cy, f = {}) {
+  if (f.acct) return null;
+  const b = budgetFor(state, cy.key);
+  const total = spendCats(state, f).reduce((s, k) => s + (Number(b[k.id]) || 0), 0);
+  return total > 0 ? total : null;
+}
+// The share of the cycle budgets that falls on a run of days, so a week across two cycles is still right.
+function budgetForDays(state, from, to, f) {
+  let total = 0; let any = false;
+  for (let d = from; d <= to; d = addDays(d, 1)) {
+    const cy = cycleOf(state, d);
+    const b = spendBudget(state, cy, f);
+    if (b !== null) { total += b / cy.days; any = true; }
+  }
+  return any ? total : null;
+}
+
+// The last n weeks, Monday to Sunday, oldest first. The last one is the week of `today`.
+export function weeks(state, today, n = 8, f = {}) {
+  const out = [];
+  const thisMon = mondayOf(today);
+  for (let i = n - 1; i >= 0; i--) {
+    const start = addDays(thisMon, -7 * i); const end = addDays(start, 6);
+    out.push({ key: start, start, end, current: i === 0, spent: spendBetween(state, start, end, f), budget: budgetForDays(state, start, end, f) });
+  }
+  return out;
+}
+export function weekStatus(w, today) {
+  const daysLeft = w.current ? daysBetween(today, w.end) + 1 : 0;
+  if (w.budget === null) return { status: '', left: null, daysLeft };
+  return { status: w.spent <= w.budget ? 'Under' : 'Over', left: w.budget - w.spent, daysLeft };
+}
+
+// The last n pay cycles, oldest first. The last one is the cycle of `today` and is usually incomplete.
+export function cycleHistory(state, today, n = 6, f = {}) {
+  const out = [];
+  let cy = cycleOf(state, today);
+  for (let i = 0; i < n; i++) {
+    let income = 0;
+    for (const tx of state.tx) {
+      if (tx.type !== 'Income' || tx.date < cy.start || tx.date > cy.end) continue;
+      if (f.acct && tx.acct !== f.acct) continue;
+      income += idrCents(state, tx);
+    }
+    out.unshift({ key: cy.key, cycle: cy, current: i === 0, spent: spendBetween(state, cy.start, cy.end, f), budget: spendBudget(state, cy, f), income: toBase(state, u(income)) });
+    cy = prevCycle(state, cy);
+  }
+  return out;
+}
+
+// Running total for one cycle, day by day up to today, against a straight budget line.
+export function pace(state, cy, today, f = {}) {
+  const last = today < cy.end ? today : cy.end;
+  const byDay = {};
+  const ids = new Set(spendCats(state, f).map((k) => k.id));
+  for (const tx of state.tx) {
+    if (tx.type !== 'Expense' || tx.date < cy.start || tx.date > last || !ids.has(tx.cat)) continue;
+    if (f.acct && tx.acct !== f.acct) continue;
+    byDay[tx.date] = (byDay[tx.date] || 0) - idrCents(state, tx);
+  }
+  const points = []; let cum = 0;
+  if (today >= cy.start) for (let d = cy.start; d <= last; d = addDays(d, 1)) { cum += byDay[d] || 0; points.push({ date: d, cum: toBase(state, u(cum)) }); }
+  const spent = toBase(state, u(cum));
+  const budget = spendBudget(state, cy, f);
+  const elapsed = points.length;
+  const daysLeft = today > cy.end ? 0 : cy.days - elapsed + (elapsed ? 1 : 0); // today still counts as a day to spend in
+  return {
+    points, spent, budget, elapsed, daysLeft,
+    expected: budget === null ? null : (budget * elapsed) / cy.days,
+    perDay: budget === null || !daysLeft ? null : (budget - spent) / daysLeft,
+    projected: elapsed ? (spent / elapsed) * cy.days : 0,
+  };
+}
+
+// How long the money lasts. Liquid money is every non-card account minus card outstanding
+// (investments only when asked). Burn is average spending minus the income that keeps coming.
+// The average uses up to n complete cycles that have transactions; with none, the current cycle is scaled up.
+export function runway(state, today, { tiers, keepIncome = [], n = 3, adjust = 0, withInvestments = false } = {}) {
+  const f = { tiers: tiers || [...SPEND_TIERS, 'Savings'] };
+  const nw = netWorth(state, today);
+  const liquid = toBase(state, nw.accounts - nw.cardDebt + (withInvestments ? nw.investments : 0));
+  const keep = new Set(keepIncome);
+  const incomeIn = (cy, to) => {
+    let v = 0;
+    for (const tx of state.tx) if (tx.type === 'Income' && keep.has(tx.cat) && tx.date >= cy.start && tx.date <= to) v += idrCents(state, tx);
+    return toBase(state, u(v));
+  };
+  const cur = cycleOf(state, today);
+  const used = [];
+  let cy = prevCycle(state, cur);
+  const first = state.tx.reduce((m, t) => (t.date < m ? t.date : m), '9999');
+  for (let i = 0; i < 24 && used.length < n && cy.end >= first; i++) {
+    if (state.tx.some((t) => t.date >= cy.start && t.date <= cy.end)) used.push(cy);
+    cy = prevCycle(state, cy);
+  }
+  let spend; let income; let scaled = false;
+  if (used.length) {
+    spend = used.reduce((s, x) => s + spendBetween(state, x.start, x.end, f), 0) / used.length;
+    income = used.reduce((s, x) => s + incomeIn(x, x.end), 0) / used.length;
+  } else {
+    const elapsed = Math.max(1, daysBetween(cur.start, today) + 1);
+    spend = (spendBetween(state, cur.start, today, f) / elapsed) * cur.days;
+    income = incomeIn(cur, today); // income usually lands once per cycle, so it is not scaled up
+    scaled = true;
+  }
+  spend *= 1 + adjust;
+  const burn = spend - income;
+  const months = burn > 0.004 ? Math.max(0, liquid) / burn : Infinity;
+  let until = null;
+  if (isFinite(months)) {
+    const whole = Math.floor(months);
+    const idx = Number(today.slice(0, 4)) * 12 + Number(today.slice(5, 7)) - 1 + whole;
+    until = cycleKey(Math.floor(idx / 12), (idx % 12) + 1);
+  }
+  return { liquid, spend, income, burn, months, until, cyclesUsed: used.length, scaled };
+}
+
+// Categories running above their own recent pattern: spending so far in this cycle against the
+// average spent by the same day of the last n cycles, so rent paid on day 1 compares with rent paid on day 1.
+export function movers(state, today, f = {}, n = 3) {
+  const cur = cycleOf(state, today);
+  const elapsed = daysBetween(cur.start, today);
+  const now = Object.fromEntries(spendByCategory(state, cur.start, today, f).map((r) => [r.id, r]));
+  const past = {}; let cy = prevCycle(state, cur); let used = 0;
+  for (let i = 0; i < n; i++) {
+    if (state.tx.some((t) => t.date >= cy.start && t.date <= cy.end)) {
+      used += 1;
+      const to = addDays(cy.start, elapsed) < cy.end ? addDays(cy.start, elapsed) : cy.end;
+      for (const r of spendByCategory(state, cy.start, to, f)) past[r.id] = { ...r, spent: (past[r.id]?.spent || 0) + r.spent };
+    }
+    cy = prevCycle(state, cy);
+  }
+  if (!used) return [];
+  const ids = new Set([...Object.keys(now), ...Object.keys(past)]);
+  return [...ids].map((id) => {
+    const usual = (past[id]?.spent || 0) / used;
+    const spent = now[id]?.spent || 0;
+    return { id, name: (now[id] || past[id]).name, spent, usual, diff: spent - usual };
+  }).filter((r) => Math.abs(r.diff) > 0.5).sort((a, b) => b.diff - a.diff);
+}

@@ -18,6 +18,7 @@ npm run build    # production build in dist/
 - Transfers and card payments as one action that writes both legs
 - Budget against actual per pay cycle, with tier allocation against a framework
 - Dashboard: cycle totals, account balances as of a date, card outstanding, net worth
+- Insights: this week against budget, pace in the cycle, month-by-month chart, how long the money lasts, with tier, account and category filters
 - Credit card utilisation, shared limits and instalment plans
 - Import of a workbook in the `financial_budget` layout, with a reconciliation of every account balance
 - Export to Excel, backup file and restore
@@ -32,6 +33,7 @@ npm run build    # production build in dist/
 | `tests/engine.test.js` | Tests for the engine. Synthetic data only. |
 | `src/xlsx.js` | Workbook import, reconciliation and Excel export. |
 | `src/main.js` | Screens and events. |
+| `src/insights.js` | Insights screen and its charts (plain SVG). |
 | `src/store.js` | Storage on the device (IndexedDB). |
 | `src/demo.js` | Sample data for Demo Mode. |
 | `src/lock.js` | App lock. |

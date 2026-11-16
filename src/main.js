@@ -4,6 +4,7 @@ import { store, emptyState, newId, todayISO } from './store.js';
 import { demoState } from './demo.js';
 import { lockEnabled, unlock, enableLock, disableLock, lockSupported } from './lock.js';
 import { loadGsi, backupToDrive, restoreFromDrive, hasToken } from './drive.js';
+import { viewInsights, insightClick, insightPrefs } from './insights.js';
 
 const app = document.getElementById('app');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -33,7 +34,7 @@ const statusChip = (s) => (s ? `<span class="chip ${/Over|High|Below/.test(s) ? 
 // ---- shell ----------------------------------------------------------------------
 const route = () => (location.hash.replace(/^#/, '') || '/');
 const go = (r) => { if (route() === r) render(); else location.hash = r; };
-const tabs = [['/', 'Home', 'M3 11l9-8 9 8M5 10v10h14V10'], ['/tx', 'Activity', 'M4 6h16M4 12h16M4 18h10'], ['/add', 'Add', 'M12 5v14M5 12h14'], ['/budget', 'Budget', 'M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6'], ['/more', 'More', 'M5 12h.01M12 12h.01M19 12h.01']];
+const tabs = [['/', 'Home', 'M3 11l9-8 9 8M5 10v10h14V10'], ['/tx', 'Activity', 'M4 6h16M4 12h16M4 18h10'], ['/add', 'Add', 'M12 5v14M5 12h14'], ['/insights', 'Insights', 'M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6'], ['/more', 'More', 'M5 12h.01M12 12h.01M19 12h.01']];
 
 function shell(title, body, { back = '', band = '' } = {}) {
   const r = route();
@@ -231,7 +232,7 @@ function viewBudget() {
   <section class="summary"><h2>Net result</h2>
     <ul class="list plain"><li><p>Budgeted net savings</p><p>${mBase(rep.budgetIncome - rep.budgetExpense)}</p></li><li><p>Actual net savings</p><p>${mBase(rep.net)}</p></li><li><p>Savings rate</p><p>${pct(rep.savingsRate)}</p></li><li><p>Days in cycle</p><p>${cy.days}</p></li><li><p>Average daily spending</p><p>${mBase(rep.avgDaily)}</p></li></ul>
   </section>`;
-  return shell('Budget', body, { band: cycleNav(cy) });
+  return shell('Budget', body, { band: cycleNav(cy), back: '/more' });
 }
 
 // ---- cards (BG-06) ----------------------------------------------------------------------
@@ -271,6 +272,7 @@ const menu = (items) => `<section class="card"><ul class="list">${items.map(([hr
 function viewMore() {
   const s = S();
   return shell('More', menu([
+    ['/budget', 'Budget', 'Budget against actual for each cycle'],
     ['/cards', 'Credit cards and instalments', 'Limits, utilisation, plans'],
     ['/setup/accounts', 'Accounts', `${s.accounts.filter((a) => !a.archived).length} active`],
     ['/setup/categories', 'Categories', `${s.categories.filter((k) => !k.archived).length} active`],
@@ -405,6 +407,7 @@ function render() {
   else if (r === '/add') html = viewForm('');
   else if (r.startsWith('/edit/')) html = viewForm(decodeURIComponent(r.slice(6)));
   else if (r === '/budget') html = viewBudget();
+  else if (r === '/insights') html = viewInsights({ s: S(), ui, today: todayISO(), esc, money, mBase, pct, monthName, niceDate, opt, shell, statusChip });
   else if (r === '/cards') html = viewCards();
   else if (r === '/more') html = viewMore();
   else if (r.startsWith('/setup/accounts')) html = viewAccounts(decodeURIComponent(r.split('/')[3] || ''));
@@ -551,6 +554,7 @@ app.addEventListener('click', async (ev) => {
   if (act === 'start-empty') { await store.replace(emptyState()); return go('/setup/accounts'); }
   if (act === 'start-demo') { await store.replace(demoState(today)); return go('/'); }
   if (act === 'start-import') return;
+  if (s && await insightClick(act, el, { s, ui, save: () => store.save() })) return render();
   if (act === 'leave-demo') { if (confirm('Remove all sample data?')) { await store.clear(); ui.summary = ui.recon = null; go('/'); } return; }
   if (act === 'cycle') { const cy = curCycle(); let m = cy.m + Number(el.dataset.step), y = cy.y; if (m === 0) { m = 12; y--; } if (m === 13) { m = 1; y++; } ui.cy = E.cycle(s, y, m); return render(); }
   if (act === 'more-tx') { ui.limit += 200; return render(); }
@@ -627,6 +631,9 @@ app.addEventListener('change', async (ev) => {
   if (chg === 'filter-cat') ui.filter.cat = el.value;
   if (chg === 'asof') ui.asOf = el.value;
   if (chg === 'planview') ui.planView = el.value;
+  if (chg === 'ins-acct') ui.ins.acct = el.value;
+  if (chg === 'ins-cat') ui.ins.cat = el.value;
+  if (chg === 'ins-inv') { insightPrefs(s).inv = el.checked; await store.save(); }
   if (chg === 'rerender-form' || chg === 'acct-ccy') {
     ui.f = formData(el.form);
     if (chg === 'acct-ccy') ui.f.ccy = acctById()[el.value]?.ccy || ui.f.ccy;
@@ -634,6 +641,8 @@ app.addEventListener('change', async (ev) => {
   if (chg === 'framework') { s.framework = el.value; await store.save(); }
   render();
 });
+// Chart bars are focusable: Enter or Space picks one, the same as a tap.
+app.addEventListener('keydown', (ev) => { if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches?.('.ch-hit')) { ev.preventDefault(); ev.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); } });
 app.addEventListener('input', (ev) => { if (ev.target.dataset.inp === 'q') { ui.q = ev.target.value; ui.limit = 100; render(); } });
 
 // App lock also applies when the app comes back from the background, not only on a cold start.

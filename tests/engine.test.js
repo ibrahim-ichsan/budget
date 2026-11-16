@@ -227,3 +227,90 @@ test('balance as of a date ignores later transactions', () => {
   assert.equal(E.balances(s, '2026-08-09').find((b) => b.id === 'bank').native, 1000000);
   assert.equal(E.balances(s, '2026-08-10').find((b) => b.id === 'bank').native, 999000);
 });
+
+// ---- Insights (BG-10) -------------------------------------------------------
+const ins = () => {
+  const s = base();
+  s.categories.push({ id: 'inv', name: 'Investing', type: 'Expense', tier: 'Savings' }, { id: 'pt', name: 'Part-time', type: 'Income', tier: 'Income' });
+  s.budgets = { default: { food: 300, fun: 150, inv: 200 } };
+  s.accounts = [{ id: 'eur', name: 'Euro Account', type: 'Bank', ccy: 'EUR', opening: 3000 }, { id: 'card', name: 'Card', type: 'Credit Card', ccy: 'IDR', opening: -2000000 }];
+  s.groups = [];
+  let n = 0;
+  const add = (date, cat, type, amt) => s.tx.push({ id: `i${++n}`, date, desc: '', cat, type, acct: 'eur', ccy: 'EUR', amt, billed: null });
+  s.tx = [];
+  // September and October 2026: complete cycles. November: in progress (today is Mon 16 Nov).
+  for (const m of ['09', '10']) { add(`2026-${m}-01`, 'sal', 'Income', 400); add(`2026-${m}-05`, 'pt', 'Income', 300); add(`2026-${m}-10`, 'food', 'Expense', -310); add(`2026-${m}-12`, 'fun', 'Expense', -90); add(`2026-${m}-15`, 'inv', 'Expense', -200); }
+  add('2026-11-03', 'food', 'Expense', -100);
+  add('2026-11-09', 'fun', 'Expense', -40);   // Monday of last week
+  add('2026-11-16', 'food', 'Expense', -30);  // today
+  add('2026-11-16', 'inv', 'Expense', -200);
+  add('2026-11-16', 'fun', 'Expense', 10);    // refund
+  return s;
+};
+const TODAY = '2026-11-16';
+
+test('Insights: week runs Monday to Sunday, leaves Savings out, nets refunds, prorates the budget', () => {
+  const s = ins();
+  const w = E.weeks(s, TODAY, 2);
+  assert.deepEqual(w.map((x) => [x.start, x.end]), [['2026-11-09', '2026-11-15'], ['2026-11-16', '2026-11-22']]);
+  assert.equal(w[0].spent, 40);
+  assert.equal(w[1].spent, 20);
+  assert.ok(Math.abs(w[1].budget - (450 * 7) / 30) < 1e-9); // food + fun over a 30-day cycle
+  assert.deepEqual(E.weekStatus(w[1], TODAY), { status: 'Under', left: w[1].budget - 20, daysLeft: 7 });
+});
+
+test('Insights: tier, category and account filters; no budget under an account filter', () => {
+  const s = ins();
+  assert.equal(E.weeks(s, TODAY, 1, { tiers: ['Needs', 'Wants', 'Giving', 'Savings'] })[0].spent, 220);
+  assert.equal(E.weeks(s, TODAY, 1, { cat: 'food' })[0].spent, 30);
+  assert.equal(E.weeks(s, TODAY, 1, { acct: 'card' })[0].spent, 0);
+  assert.equal(E.weeks(s, TODAY, 1, { acct: 'eur' })[0].budget, null);
+});
+
+test('Insights: cycle history, oldest first, with income and budget', () => {
+  const h = E.cycleHistory(ins(), TODAY, 3);
+  assert.deepEqual(h.map((x) => [x.key, x.spent, x.income, x.budget, x.current]), [['2026-09', 400, 700, 450, false], ['2026-10', 400, 700, 450, false], ['2026-11', 160, 0, 450, true]]);
+});
+
+test('Insights: pace gives the running total, the expected spend so far and the daily allowance', () => {
+  const s = ins();
+  const p = E.pace(s, E.cycleOf(s, TODAY), TODAY);
+  assert.equal(p.points.length, 16);
+  assert.equal(p.points[2].cum, 100);
+  assert.equal(p.spent, 160);
+  assert.equal(p.expected, (450 * 16) / 30);
+  assert.equal(p.daysLeft, 15);
+  assert.ok(Math.abs(p.perDay - (450 - 160) / 15) < 1e-9);
+});
+
+test('Insights: runway without part-time income, from the last complete cycles', () => {
+  const s = ins();
+  // Liquid: 3000 + 2 x (700 - 600) - 360 spent in Nov = 2840 EUR, minus card 2,000,000 IDR = 100 EUR -> 2740.
+  const r = E.runway(s, TODAY, { tiers: ['Needs', 'Wants', 'Giving'], keepIncome: ['sal'] });
+  assert.equal(r.liquid, 2740);
+  assert.equal(r.spend, 400);
+  assert.equal(r.income, 400);
+  assert.equal(r.months, Infinity); // salary alone covers spending
+  const none = E.runway(s, TODAY, { tiers: ['Needs', 'Wants', 'Giving'], keepIncome: [] });
+  assert.equal(none.burn, 400);
+  assert.ok(Math.abs(none.months - 6.85) < 1e-9);
+  assert.equal(none.until, '2027-05');
+  assert.equal(none.cyclesUsed, 2);
+  assert.ok(Math.abs(E.runway(s, TODAY, { tiers: ['Needs', 'Wants', 'Giving'], adjust: 0.25 }).months - 5.48) < 1e-9);
+});
+
+test('Insights: runway with no complete cycle scales the current one and says so', () => {
+  const s = ins();
+  s.tx = s.tx.filter((t) => t.date >= '2026-11-01');
+  const r = E.runway(s, TODAY, { tiers: ['Needs', 'Wants', 'Giving'] });
+  assert.equal(r.scaled, true);
+  assert.equal(r.spend, (160 / 16) * 30);
+});
+
+test('Insights: movers compare with what was spent by the same day of earlier cycles', () => {
+  const m = E.movers(ins(), TODAY);
+  const food = m.find((x) => x.id === 'food');
+  assert.equal(food.usual, 310); // both earlier cycles had spent 310 on food by day 16
+  assert.equal(food.spent, 130);
+  assert.ok(m[0].diff >= m[m.length - 1].diff);
+});
