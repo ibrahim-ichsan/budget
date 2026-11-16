@@ -3,6 +3,7 @@ import * as E from './engine.js';
 import { store, emptyState, newId, todayISO } from './store.js';
 import { demoState } from './demo.js';
 import { lockEnabled, unlock, enableLock, disableLock, lockSupported } from './lock.js';
+import { loadGsi, backupToDrive, restoreFromDrive, hasToken } from './drive.js';
 
 const app = document.getElementById('app');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -364,9 +365,15 @@ function viewData() {
     ${sum.flagged.length ? `<h3>Rows to review</h3><ul class="bul">${sum.flagged.slice(0, 40).map((x) => `<li>${esc(x)}</li>`).join('')}</ul>${sum.flagged.length > 40 ? `<p class="note">and ${sum.flagged.length - 40} more.</p>` : ''}` : ''}
     </section>` : '';
   const body = `${sumHtml}${recHtml}
-  <section class="card"><h2>Backup</h2>
+  <section class="card"><h2>Google Drive backup</h2>
+    <p class="p">${s?.meta.lastDrive ? `Last Drive backup ${niceDate(s.meta.lastDrive)}.` : 'Not backed up to Drive yet.'} The app keeps one file, budget-backup.json, in your Drive and can see only files it created.</p>
+    <button type="button" class="pill solid" data-act="drive-backup">Back up to Google Drive</button>
+    <button type="button" class="pill soft" data-act="drive-restore">Restore from Google Drive</button>
+    <p class="note">After the first backup in a session, later changes are sent to Drive on their own for about an hour. After that, tap once more.</p>
+  </section>
+  <section class="card"><h2>Backup file</h2>
     <p class="p">${s?.meta.lastBackup ? `Last backup ${niceDate(s.meta.lastBackup)}.` : 'No backup yet.'} A backup is one file holding everything.</p>
-    <button type="button" class="pill solid" data-act="backup">Save backup file</button>
+    <button type="button" class="pill soft" data-act="backup">Save backup file</button>
     <label class="pill soft filebtn">Restore from a backup file<input type="file" accept="application/json,.json" data-file="restore"></label>
   </section>
   <section class="card"><h2>Excel</h2>
@@ -404,7 +411,7 @@ function render() {
   else if (r.startsWith('/setup/categories')) html = viewCategories(decodeURIComponent(r.split('/')[3] || ''));
   else if (r === '/setup/rates') html = viewRates();
   else if (r === '/setup/cycle') html = viewCycle();
-  else if (r === '/data') html = viewData();
+  else if (r === '/data') { html = viewData(); if (navigator.onLine) loadGsi().catch(() => {}); }
   else html = viewHome();
   const keep = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.inp;
   app.innerHTML = html;
@@ -419,7 +426,18 @@ window.addEventListener('hashchange', () => {
 
 const numIn = (v) => { const n = Number(String(v ?? '').replace(/\s/g, '').replace(',', '.')); return isFinite(n) ? n : NaN; };
 const formData = (form) => Object.fromEntries(new FormData(form).entries());
-const commit = async (msg) => { await store.save(); ui.cy = null; if (msg) ui.msg = msg; };
+const backupPayload = () => ({ app: 'budget', version: 1, exported: todayISO(), state: S() });
+let driveTimer = 0;
+// While a Google sign-in from this session is still valid, changes go to Drive on their own.
+function scheduleDrive() {
+  if (!ui.driveAuto || !hasToken() || !S() || S().meta.demo) return;
+  clearTimeout(driveTimer);
+  driveTimer = setTimeout(async () => {
+    try { if (!hasToken()) return; await backupToDrive(backupPayload()); const s = S(); s.meta.lastDrive = s.meta.lastBackup = todayISO(); s.meta.dirty = false; await store.save(false); }
+    catch { /* the next manual backup reports any problem */ }
+  }, 5000);
+}
+const commit = async (msg) => { await store.save(); ui.cy = null; if (msg) ui.msg = msg; scheduleDrive(); };
 const download = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); };
 const loadExcel = async () => { const m = await import('exceljs/dist/exceljs.min.js'); return m.default || m; };
 
@@ -548,8 +566,26 @@ app.addEventListener('click', async (ev) => {
   if (act === 'del-override') { delete s.overrides[el.dataset.id]; await commit(); return render(); }
   if (act === 'backup') {
     s.meta.lastBackup = today; s.meta.dirty = false; await store.save(false);
-    download(new Blob([JSON.stringify({ app: 'budget', version: 1, exported: today, state: s })], { type: 'application/json' }), `budget-backup-${today}.json`);
+    download(new Blob([JSON.stringify(backupPayload())], { type: 'application/json' }), `budget-backup-${today}.json`);
     ui.msg = 'Backup file saved. Keep a copy outside this phone.'; return render();
+  }
+  if (act === 'drive-backup') {
+    if (s.meta.demo) { ui.msg = 'Sample data is not backed up. Leave Demo Mode first.'; return render(); }
+    try {
+      await backupToDrive(backupPayload());
+      s.meta.lastDrive = s.meta.lastBackup = today; s.meta.dirty = false; await store.save(false); ui.driveAuto = true;
+      ui.msg = 'Backed up to Google Drive.';
+    } catch (err) { ui.msg = `Drive backup failed: ${err.message}`; }
+    return render();
+  }
+  if (act === 'drive-restore') {
+    try {
+      const { data, modified } = await restoreFromDrive();
+      if (data.app !== 'budget' || !data.state) throw new Error('The file in Drive is not a Budget backup.');
+      if (!confirm(`Replace everything with the Drive backup from ${String(modified).slice(0, 10)}? It holds ${data.state.accounts.length} accounts and ${data.state.tx.length} transactions.`)) return;
+      await store.replace(data.state); ui.cy = null; ui.driveAuto = true; ui.msg = 'Restored from Google Drive.';
+    } catch (err) { ui.msg = `Drive restore failed: ${err.message}`; }
+    return render();
   }
   if (act === 'export') {
     try { const { exportWorkbook } = await import('./xlsx.js'); const buf = await exportWorkbook(s, await loadExcel(), today);
