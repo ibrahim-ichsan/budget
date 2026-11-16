@@ -600,6 +600,15 @@ app.addEventListener('change', async (ev) => {
 });
 app.addEventListener('input', (ev) => { if (ev.target.dataset.inp === 'q') { ui.q = ev.target.value; ui.limit = 100; render(); } });
 
+// App lock also applies when the app comes back from the background, not only on a cold start.
+// A short grace period keeps the file picker and other system sheets from locking mid-task.
+const LOCK_GRACE_MS = 30000;
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+  if (lockEnabled() && !locked && hiddenAt && Date.now() - hiddenAt > LOCK_GRACE_MS) { locked = true; ui.err = ''; render(); }
+});
+
 (async function init() {
   await store.load();
   lastRoute = route();
